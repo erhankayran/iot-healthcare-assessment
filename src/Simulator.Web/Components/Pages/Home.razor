@@ -1,0 +1,354 @@
+﻿@page "/"
+@rendermode InteractiveServer
+@implements IAsyncDisposable
+
+@using Simulator.Application.Abstractions
+@using Simulator.Application.Services
+@using Simulator.Domain.Constants
+@using Simulator.Domain.Enums
+@using Simulator.Infrastructure.Options
+@using Microsoft.Extensions.Options
+
+@inject TelemetrySimulationService SimulationService
+@inject IRandomTelemetryGenerator RandomGenerator
+@inject ICsvTelemetryParser CsvParser
+@inject IOptions<ThingsBoardOptions> ThingsBoardOptions
+
+<PageTitle>Koç Healthcare IoT Simulator</PageTitle>
+
+<div class="simulator-container">
+    <header class="simulator-header">
+        <img src="/branding/logo.svg" alt="Koç Healthcare IoT" class="brand-logo" />
+        <div>
+            <h1>Vital Signs Simulator</h1>
+            <p class="subtitle">Koç Healthcare IoT — Heart rate &amp; SpO2 telemetry to ThingsBoard via MQTT.</p>
+        </div>
+    </header>
+
+    <section class="mode-selector">
+        <label>Telemetry mode</label>
+        <div class="mode-buttons">
+            @foreach (var mode in Enum.GetValues<TelemetryMode>())
+            {
+                <button type="button"
+                        class="mode-button @(SelectedMode == mode ? "active" : string.Empty)"
+                        @onclick="() => SelectMode(mode)">
+                    @GetModeLabel(mode)
+                </button>
+            }
+        </div>
+    </section>
+
+    @if (!string.IsNullOrWhiteSpace(StatusMessage))
+    {
+        <div class="status-message @StatusClass">@StatusMessage</div>
+    }
+
+    @if (SelectedMode == TelemetryMode.Manual)
+    {
+        <section class="panel">
+            <h2>Manual entry</h2>
+            <div class="form-grid">
+                <label>
+                    Heart rate (bpm)
+                    <input type="number" min="@VitalSignRanges.HeartRateMin" max="@VitalSignRanges.HeartRateMax" @bind="ManualHeartRate" />
+                </label>
+                <label>
+                    SpO2 (%)
+                    <input type="number" min="@VitalSignRanges.SpO2Min" max="@VitalSignRanges.SpO2Max" @bind="ManualSpO2" />
+                </label>
+            </div>
+            <button type="button" class="primary-button" disabled="@IsBusy" @onclick="PublishManualAsync">
+                Send telemetry
+            </button>
+        </section>
+    }
+    else if (SelectedMode == TelemetryMode.Random)
+    {
+        <section class="panel">
+            <h2>Random generation</h2>
+            <p>
+                Generates realistic values every
+                <strong>@ThingsBoardOptions.Value.PublishIntervalMilliseconds ms</strong>.
+            </p>
+            <div class="action-row">
+                @if (!IsStreaming)
+                {
+                    <button type="button" class="primary-button" disabled="@IsBusy" @onclick="StartRandomStreamAsync">
+                        Start streaming
+                    </button>
+                }
+                else
+                {
+                    <button type="button" class="secondary-button" @onclick="StopStreaming">
+                        Stop streaming
+                    </button>
+                }
+                <button type="button" class="secondary-button" disabled="@IsBusy" @onclick="PublishSingleRandomAsync">
+                    Send once
+                </button>
+            </div>
+        </section>
+    }
+    else
+    {
+        <section class="panel">
+            <h2>CSV upload</h2>
+            <p>Expected columns: <code>HeartRate,SpO2</code> (optional header row).</p>
+            <InputFile OnChange="HandleCsvUploadAsync" accept=".csv,text/csv" />
+            @if (CsvReadings.Count > 0)
+            {
+                <p class="csv-summary">Loaded @CsvReadings.Count reading(s).</p>
+                <div class="action-row">
+                    <button type="button" class="primary-button" disabled="@IsBusy" @onclick="PublishCsvOnceAsync">
+                        Publish all once
+                    </button>
+                    @if (!IsStreaming)
+                    {
+                        <button type="button" class="secondary-button" disabled="@IsBusy" @onclick="StartCsvStreamAsync">
+                            Stream from CSV
+                        </button>
+                    }
+                    else
+                    {
+                        <button type="button" class="secondary-button" @onclick="StopStreaming">
+                            Stop streaming
+                        </button>
+                    }
+                </div>
+            }
+        </section>
+    }
+
+    @if (LastPublished is not null)
+    {
+        <section class="panel last-reading">
+            <h2>Last published reading</h2>
+            <dl>
+                <div><dt>Heart rate</dt><dd>@LastPublished.HeartRate bpm</dd></div>
+                <div><dt>SpO2</dt><dd>@LastPublished.SpO2 %</dd></div>
+                <div><dt>Timestamp (UTC)</dt><dd>@LastPublished.Timestamp.ToString("u")</dd></div>
+            </dl>
+        </section>
+    }
+</div>
+
+@code {
+    private TelemetryMode SelectedMode { get; set; } = TelemetryMode.Manual;
+    private int ManualHeartRate { get; set; } = 72;
+    private int ManualSpO2 { get; set; } = 98;
+    private string? StatusMessage { get; set; }
+    private string StatusClass { get; set; } = "info";
+    private bool IsBusy { get; set; }
+    private bool IsStreaming { get; set; }
+    private VitalTelemetry? LastPublished { get; set; }
+    private List<VitalTelemetry> CsvReadings { get; } = [];
+    private CancellationTokenSource? _streamCancellation;
+
+    private static string GetModeLabel(TelemetryMode mode) => mode switch
+    {
+        TelemetryMode.Manual => "Manual",
+        TelemetryMode.Random => "Random",
+        TelemetryMode.Csv => "CSV upload",
+        _ => mode.ToString()
+    };
+
+    private void SelectMode(TelemetryMode mode)
+    {
+        StopStreaming();
+        SelectedMode = mode;
+        ClearStatus();
+    }
+
+    private async Task PublishManualAsync()
+    {
+        await ExecuteAsync(async () =>
+        {
+            await SimulationService.PublishManualAsync(ManualHeartRate, ManualSpO2);
+            LastPublished = new(ManualHeartRate, ManualSpO2, DateTimeOffset.UtcNow);
+            SetStatus("Manual telemetry published successfully.", "success");
+        });
+    }
+
+    private async Task PublishSingleRandomAsync()
+    {
+        await ExecuteAsync(async () =>
+        {
+            var telemetry = RandomGenerator.Generate();
+            await SimulationService.PublishAsync(telemetry);
+            LastPublished = telemetry;
+            SetStatus("Random telemetry published successfully.", "success");
+        });
+    }
+
+    private Task StartRandomStreamAsync()
+    {
+        return StartStreamAsync(async (cancellationToken) =>
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var telemetry = RandomGenerator.Generate();
+                await SimulationService.PublishAsync(telemetry, cancellationToken);
+                LastPublished = telemetry;
+                SetStatus($"Streaming random telemetry... HR={telemetry.HeartRate}, SpO2={telemetry.SpO2}", "info");
+                await Task.Delay(ThingsBoardOptions.Value.PublishIntervalMilliseconds, cancellationToken);
+            }
+        });
+    }
+
+    private async Task HandleCsvUploadAsync(InputFileChangeEventArgs args)
+    {
+        ClearStatus();
+        CsvReadings.Clear();
+
+        try
+        {
+            var file = args.File;
+            if (file is null)
+            {
+                SetStatus("No file selected.", "error");
+                return;
+            }
+
+            await using var stream = file.OpenReadStream(maxAllowedSize: 1024 * 1024);
+            using var reader = new StreamReader(stream);
+            var content = await reader.ReadToEndAsync();
+            var parsed = CsvParser.Parse(content);
+            CsvReadings.AddRange(parsed);
+            SetStatus($"Loaded {CsvReadings.Count} CSV row(s).", "success");
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, "error");
+        }
+    }
+
+    private async Task PublishCsvOnceAsync()
+    {
+        if (CsvReadings.Count == 0)
+        {
+            SetStatus("Upload a CSV file first.", "error");
+            return;
+        }
+
+        await ExecuteAsync(async () =>
+        {
+            foreach (var reading in CsvReadings)
+            {
+                await SimulationService.PublishAsync(reading);
+                LastPublished = reading;
+            }
+
+            SetStatus($"Published {CsvReadings.Count} CSV reading(s).", "success");
+        });
+    }
+
+    private Task StartCsvStreamAsync()
+    {
+        if (CsvReadings.Count == 0)
+        {
+            SetStatus("Upload a CSV file first.", "error");
+            return Task.CompletedTask;
+        }
+
+        var readings = CsvReadings.ToList();
+        var index = 0;
+
+        return StartStreamAsync(async (cancellationToken) =>
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var telemetry = readings[index];
+                await SimulationService.PublishAsync(telemetry, cancellationToken);
+                LastPublished = telemetry;
+                index = (index + 1) % readings.Count;
+                SetStatus(
+                    $"Streaming CSV telemetry... row {index}/{readings.Count}, HR={telemetry.HeartRate}, SpO2={telemetry.SpO2}",
+                    "info");
+                await Task.Delay(ThingsBoardOptions.Value.PublishIntervalMilliseconds, cancellationToken);
+            }
+        });
+    }
+
+    private Task StartStreamAsync(Func<CancellationToken, Task> streamAction)
+    {
+        StopStreaming();
+        _streamCancellation = new CancellationTokenSource();
+        IsStreaming = true;
+        ClearStatus();
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await streamAction(_streamCancellation.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected when streaming stops.
+            }
+            catch (Exception ex)
+            {
+                await InvokeAsync(() =>
+                {
+                    SetStatus(ex.Message, "error");
+                    IsStreaming = false;
+                    StateHasChanged();
+                });
+            }
+        }, _streamCancellation.Token);
+
+        return Task.CompletedTask;
+    }
+
+    private void StopStreaming()
+    {
+        if (_streamCancellation is null)
+        {
+            IsStreaming = false;
+            return;
+        }
+
+        _streamCancellation.Cancel();
+        _streamCancellation.Dispose();
+        _streamCancellation = null;
+        IsStreaming = false;
+    }
+
+    private async Task ExecuteAsync(Func<Task> action)
+    {
+        IsBusy = true;
+        ClearStatus();
+
+        try
+        {
+            await action();
+        }
+        catch (Exception ex)
+        {
+            SetStatus(ex.Message, "error");
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void SetStatus(string message, string cssClass)
+    {
+        StatusMessage = message;
+        StatusClass = cssClass;
+    }
+
+    private void ClearStatus()
+    {
+        StatusMessage = null;
+        StatusClass = "info";
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        StopStreaming();
+        await Task.CompletedTask;
+    }
+}

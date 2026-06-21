@@ -1,0 +1,62 @@
+# ThingsBoard CE + PostgreSQL (single-node, development / assessment)
+# Docs: https://thingsboard.io/docs/user-guide/install/docker/
+#
+# First-time setup:
+#   1. docker compose up -d postgres
+#   2. docker compose run --rm -e INSTALL_TB=true -e LOAD_DEMO=false thingsboard-ce
+#   3. docker compose up -d
+#
+# UI:  http://localhost:8080  (sysadmin@thingsboard.org / sysadmin)
+# MQTT: localhost:1883
+
+name: healthcare-iot
+
+services:
+  postgres:
+    restart: unless-stopped
+    image: postgres:16
+    environment:
+      POSTGRES_DB: thingsboard
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d thingsboard"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  thingsboard-ce:
+    restart: unless-stopped
+    image: thingsboard/tb-node:4.3.1.2
+    ports:
+      - "${TB_HTTP_PORT:-8080}:8080"
+      - "${TB_MQTT_PORT:-1883}:1883"
+      - "7070:7070"
+    logging:
+      driver: json-file
+      options:
+        max-size: 100m
+        max-file: "10"
+    environment:
+      TB_SERVICE_ID: tb-ce-node
+      TB_QUEUE_TYPE: in-memory
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/thingsboard
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      SPRING_MAIL_HOST: ${SMTP_HOST:-}
+      SPRING_MAIL_PORT: ${SMTP_PORT:-587}
+      SPRING_MAIL_USERNAME: ${SMTP_USERNAME:-}
+      SPRING_MAIL_PASSWORD: ${SMTP_PASSWORD:-}
+      SPRING_MAIL_PROPERTIES_MAIL_SMTP_AUTH: "true"
+      SPRING_MAIL_PROPERTIES_MAIL_SMTP_STARTTLS_ENABLE: "true"
+      TB_MAIL_FROM: ${SMTP_FROM:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+    name: healthcare-tb-postgres-data

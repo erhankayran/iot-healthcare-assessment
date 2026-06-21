@@ -1,0 +1,22 @@
+# Docker secrets
+docker/.env
+
+# .NET
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.cache
+
+# OS
+Thumbs.db
+.DS_Store
+
+# IDE
+.idea/
+*.swp
+
+# Local overrides (keep real tokens here)
+appsettings.local.json
+**/appsettings.local.json
